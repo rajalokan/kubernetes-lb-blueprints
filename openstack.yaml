@@ -6,44 +6,35 @@ description: >
 
 imports:
   - http://www.getcloudify.org/spec/cloudify/4.3/types.yaml
-  - plugin:cloudify-diamond-plugin
+  # - http://www.getcloudify.org/spec/diamond-plugin/1.3.6/plugin.yaml
+  # - plugin:cloudify-diamond-plugin
+
   - plugin:cloudify-fabric-plugin
   - plugin:cloudify-utilities-plugin
   - plugin:cloudify-openstack-plugin
+
   - imports/kubernetes.yaml
   - imports/cloud-config.yaml
 
-inputs:
+  - inputs/openstack_inputs.yaml
+  - inputs/inputs.yaml
 
-  image:
-    description: Image to be used when launching agent VMs
-    default: { get_secret: centos_core_image }
-
-  flavor:
-    description: Flavor of the agent VMs
-    default: { get_secret: large_image_flavor }
-
-  agent_user:
-    description: >
-      User for connecting to agent VMs
-    default: centos
-
-  node_security_group:
-    description: >
-      The resource id of the security group
 
 dsl_definitions:
 
   openstack_config: &openstack_config
-    username: { get_secret: keystone_username }
-    password: { get_secret: keystone_password }
-    tenant_name: { get_secret: keystone_tenant_name }
-    auth_url: { get_secret: keystone_url }
-    region: { get_secret: region }
+    username: { get_input: keystone_username }
+    user_domain_name: { get_input: keystone_user_domain_name }
+    password: { get_input: keystone_password }
+    project_name: { get_input: keystone_project_name }
+    project_domain_name: { get_input: keystone_project_domain_name }
+    auth_url: { get_input: keystone_url }
+    region: { get_input: region }
+
 
 node_templates:
 
-  k8s_load_host:
+  k8s_lb_host:
     type: cloudify.openstack.nodes.Server
     properties:
       openstack_config: *openstack_config
@@ -52,65 +43,55 @@ node_templates:
           install_method: remote
           port: 22
           key: { get_secret: agent_key_private }
-      server:
-        key_name: ''
-        image: ''
-        flavor: ''
-      management_network_name: { get_property: [ public_network, resource_id ] }
+      image: { get_input: image }
+      flavor: { get_input: flavor }
     relationships:
       - type: cloudify.relationships.contained_in
         target: k8s_node_scaling_tier
       - type: cloudify.relationships.depends_on
-        target: cloudify_load_cloud_config
-      - target: kubernetes_load_port
+        target: cloudify_lb_cloud_config
+      - target: kubernetes_lb_port
         type: cloudify.openstack.server_connected_to_port
     interfaces:
       cloudify.interfaces.lifecycle:
         create:
           inputs:
             args:
-              image: { get_input: image }
-              flavor: { get_input: flavor }
-              userdata: { get_attribute: [ cloudify_load_cloud_config, cloud_config ] }
-      cloudify.interfaces.monitoring_agent:
-          install:
-            implementation: diamond.diamond_agent.tasks.install
-            inputs:
-              diamond_config:
-                interval: 1
-          start: diamond.diamond_agent.tasks.start
-          stop: diamond.diamond_agent.tasks.stop
-          uninstall: diamond.diamond_agent.tasks.uninstall
-      cloudify.interfaces.monitoring:
-          start:
-            implementation: diamond.diamond_agent.tasks.add_collectors
-            inputs:
-              collectors_config:
-                CPUCollector: {}
-                MemoryCollector: {}
-                LoadAverageCollector: {}
-                DiskUsageCollector:
-                  config:
-                    devices: x?vd[a-z]+[0-9]*$
-                NetworkCollector: {}
-                ProcessResourcesCollector:
-                  config:
-                    enabled: true
-                    unit: B
-                    measure_collector_time: true
-                    cpu_interval: 0.5
-                    process:
-                      hyperkube:
-                        name: hyperkube
+              userdata: { get_attribute: [ cloudify_lb_cloud_config, cloud_config ] }
+      # cloudify.interfaces.monitoring_agent:
+      #     install:
+      #       implementation: diamond.diamond_agent.tasks.install
+      #       inputs:
+      #         diamond_config:
+      #           interval: 1
+      #     start: diamond.diamond_agent.tasks.start
+      #     stop: diamond.diamond_agent.tasks.stop
+      #     uninstall: diamond.diamond_agent.tasks.uninstall
+      # cloudify.interfaces.monitoring:
+      #     start:
+      #       implementation: diamond.diamond_agent.tasks.add_collectors
+      #       inputs:
+      #         collectors_config:
+      #           CPUCollector: {}
+      #           MemoryCollector: {}
+      #           LoadAverageCollector: {}
+      #           DiskUsageCollector:
+      #             config:
+      #               devices: x?vd[a-z]+[0-9]*$
+      #           NetworkCollector: {}
+      #           ProcessResourcesCollector:
+      #             config:
+      #               enabled: true
+      #               unit: B
+      #               measure_collector_time: true
+      #               cpu_interval: 0.5
+      #               process:
+      #                 hyperkube:
+      #                   name: hyperkube
 
-  kubernetes_security_group:
-    type: cloudify.openstack.nodes.SecurityGroup
-    properties:
-      openstack_config: *openstack_config
-      use_external_resource: true
-      resource_id: { get_input: node_security_group }
+  # ----------------------------------------------------------------------------
 
-  kubernetes_load_port:
+  kubernetes_lb_port:
     type: cloudify.openstack.nodes.Port
     properties:
       openstack_config: *openstack_config
@@ -124,14 +105,25 @@ node_templates:
       - type: cloudify.openstack.port_connected_to_security_group
         target: kubernetes_security_group
       - type: cloudify.openstack.port_connected_to_floating_ip
-        target: k8s_load_public_ip
+        target: k8s_lb_public_ip
+
+  # ----------------------------------------------------------------------------
+
+  kubernetes_security_group:
+    type: cloudify.openstack.nodes.SecurityGroup
+    properties:
+      openstack_config: *openstack_config
+      use_external_resource: true
+      resource_id: { get_input: node_security_group }
+
+  # ----------------------------------------------------------------------------
 
   public_subnet:
     type: cloudify.openstack.nodes.Subnet
     properties:
       openstack_config: *openstack_config
       use_external_resource: true
-      resource_id: { get_secret: public_subnet_name }
+      resource_id: { get_input: public_subnet_name }
     relationships:
       - target: public_network
         type: cloudify.relationships.contained_in
@@ -143,14 +135,14 @@ node_templates:
     properties:
       openstack_config: *openstack_config
       use_external_resource: true
-      resource_id: { get_secret: public_network_name }
+      resource_id: { get_input: public_network_name }
 
   router:
     type: cloudify.openstack.nodes.Router
     properties:
       openstack_config: *openstack_config
       use_external_resource: true
-      resource_id: { get_secret: router_name }
+      resource_id: { get_input: router_name }
     relationships:
       - target: external_network
         type: cloudify.relationships.connected_to
@@ -162,10 +154,12 @@ node_templates:
       use_external_resource: true
       resource_id: { get_secret: external_network_name }
 
+  # ----------------------------------------------------------------------------
+
   k8s_node_scaling_tier:
     type: cloudify.nodes.Root
 
-  k8s_load_public_ip:
+  k8s_lb_public_ip:
     type: cloudify.openstack.nodes.FloatingIP
     properties:
       openstack_config: *openstack_config
@@ -173,17 +167,17 @@ node_templates:
         floating_network_name: { get_property: [ external_network, resource_id ] }
 
 groups:
-  k8s_load_group:
+  k8s_lb_group:
     members:
-      - k8s_load_host
-      - kubernetes_load_port
+      - k8s_lb_host
+      - kubernetes_lb_port
 
 policies:
-  kubernetes_load_vms_scaling_policy:
+  kubernetes_lb_vms_scaling_policy:
     type: cloudify.policies.scaling
     properties:
       default_instances:  1
-    targets: [k8s_load_group]
+    targets: [k8s_lb_group]
 
 outputs:
   deployment-type:
